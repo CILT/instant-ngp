@@ -104,6 +104,13 @@ if __name__ == "__main__":
 	testbed = ngp.Testbed(mode)
 	testbed.nerf.sharpen = float(args.sharpen)
 
+	crop_scale = ngp.BoundingBox()
+	crop_scale.min = [0.046, 0.046, 0.046]
+	crop_scale.max = [1.081, 1.081, 1.081]
+	testbed.raw_aabb = crop_scale
+	testbed.aabb = crop_scale
+	testbed.render_aabb = crop_scale
+
 	if mode == ngp.TestbedMode.Sdf:
 		testbed.tonemap_curve = ngp.TonemapCurve.ACES
 
@@ -175,6 +182,7 @@ if __name__ == "__main__":
 	if n_steps < 0:
 		n_steps = 100000
 
+	min_steps = 3000
 	losses = 0
 	if n_steps > 0:
 		with tqdm(desc="Training", total=n_steps, unit="step") as t:
@@ -189,9 +197,9 @@ if __name__ == "__main__":
 						break
 				# print(testbed.loss)
 				# Another option for finishing training
-				if testbed.loss <= 0.008:
+				if testbed.loss <= 0.0015:
 					losses += 1
-					if losses >= 15 and testbed.training_step >= 500:
+					if losses >= 15 and testbed.training_step >= min_steps:
 						break
 				else:
 					losses = 0
