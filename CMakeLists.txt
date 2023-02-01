@@ -383,13 +383,10 @@ set(NGP_BINARY_FILE "\"${CMAKE_CURRENT_SOURCE_DIR}/$<TARGET_FILE_NAME:instant-ng
 if (MSVC)
 	add_custom_command(TARGET instant-ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:instant-ngp> ${CMAKE_CURRENT_SOURCE_DIR})
 	file(GLOB NGP_REQUIRED_DLLS "${CUDA_COMPILER_BIN}/cudart64*.dll")
-<<<<<<< HEAD
-	list(APPEND NGP_REQUIRED_DLLS "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/dlss/lib/Windows_x86_64/${NGX_BUILD_DIR}/nvngx_dlss.dll")
-=======
+
 	if (NGP_VULKAN)
 		list(APPEND NGP_REQUIRED_DLLS "${NGX_SHARED_LIB}")
 	endif()
->>>>>>> 84baefe412dbddb3f5cea37003b92dea65cd0a5a
 	if (NGP_REQUIRED_DLLS)
 		add_custom_command(TARGET instant-ngp POST_BUILD
 			COMMAND ${CMAKE_COMMAND} -E copy ${NGP_REQUIRED_DLLS} ${CMAKE_CURRENT_SOURCE_DIR}
