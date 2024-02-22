@@ -182,6 +182,7 @@ if __name__ == "__main__":
 	if n_steps < 0:
 		n_steps = 100000
 
+	n_steps = 10000  # Max training steps if loss to high
 	min_steps = 3000
 	losses = 0
 	if n_steps > 0:
