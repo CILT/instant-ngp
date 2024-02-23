@@ -101,6 +101,10 @@ if __name__ == "__main__":
 	if not os.path.isabs(network):
 		network = os.path.join(configs_dir, network)
 
+	##################################################################################
+	# This crops the object, or deletes the surrounding scene.
+	# Allows to get a better resolution by using tets in the important object rather
+	# than on the scene.
 	testbed = ngp.Testbed(mode)
 	testbed.nerf.sharpen = float(args.sharpen)
 
@@ -110,6 +114,7 @@ if __name__ == "__main__":
 	testbed.raw_aabb = crop_scale
 	testbed.aabb = crop_scale
 	testbed.render_aabb = crop_scale
+	##################################################################################
 
 	if mode == ngp.TestbedMode.Sdf:
 		testbed.tonemap_curve = ngp.TonemapCurve.ACES
@@ -182,6 +187,10 @@ if __name__ == "__main__":
 	if n_steps < 0:
 		n_steps = 100000
 
+	##################################################################################
+	# Manage training steps based on inference quality, determined by loss
+	# Maximum: 10,000 steps
+	# Minimum:  3,000 steps - this enhances quality, mainly with mesh 'density'
 	n_steps = 10000  # Max training steps if loss to high
 	min_steps = 3000
 	losses = 0
@@ -213,6 +222,8 @@ if __name__ == "__main__":
 				t.update(testbed.training_step - old_training_step)
 				t.set_postfix(loss=testbed.loss)
 				old_training_step = testbed.training_step
+	# End my code
+	##################################################################################
 
 	if args.save_snapshot:
 		print("Saving snapshot ", args.save_snapshot)
