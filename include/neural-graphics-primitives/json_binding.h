@@ -10,7 +10,7 @@
 
 /** @file   json_binding.h
  *  @author Thomas Müller, NVIDIA
- *  @brief  Conversion between eigen
+ *  @brief  Conversion between some ngp types and nlohmann::json.
  */
 
 #pragma once
@@ -18,66 +18,20 @@
 #include <neural-graphics-primitives/common.h>
 #include <neural-graphics-primitives/nerf_loader.h>
 
+#include <tiny-cuda-nn/vec_json.h>
+
 #include <json/json.hpp>
 
-NGP_NAMESPACE_BEGIN
-
-// Conversion between eigen and json
-template <typename Derived>
-void to_json(nlohmann::json& j, const Eigen::MatrixBase<Derived>& mat) {
-	for (int row = 0; row < mat.rows(); ++row) {
-		if (mat.cols() == 1) {
-			j.push_back(mat(row));
-		} else {
-			nlohmann::json column = nlohmann::json::array();
-			for (int col = 0; col < mat.cols(); ++col) {
-				column.push_back(mat(row, col));
-			}
-			j.push_back(column);
-		}
-	}
-}
-
-template <typename Derived>
-void from_json(const nlohmann::json& j, Eigen::MatrixBase<Derived>& mat) {
-	for (std::size_t row = 0; row < j.size(); ++row) {
-		const auto& jrow = j.at(row);
-		if (jrow.is_array()) {
-			for (std::size_t col = 0; col < jrow.size(); ++col) {
-				const auto& value = jrow.at(col);
-				mat(row, col) = value.get<typename Eigen::MatrixBase<Derived>::Scalar>();
-			}
-		} else {
-			mat(row) = jrow.get<typename Eigen::MatrixBase<Derived>::Scalar>();
-		}
-	}
-}
-
-template <typename Derived>
-void to_json(nlohmann::json& j, const Eigen::QuaternionBase<Derived>& q) {
-	j.push_back(q.w());
-	j.push_back(q.x());
-	j.push_back(q.y());
-	j.push_back(q.z());
-}
-
-template <typename Derived>
-void from_json(const nlohmann::json& j, Eigen::QuaternionBase<Derived>& q) {
-	using Scalar = typename Eigen::QuaternionBase<Derived>::Scalar;
-	q.w() = j.at(0).get<Scalar>();
-	q.x() = j.at(1).get<Scalar>();
-	q.y() = j.at(2).get<Scalar>();
-	q.z() = j.at(3).get<Scalar>();
-}
+namespace ngp {
 
 inline void to_json(nlohmann::json& j, const BoundingBox& box) {
-	to_json(j["min"], box.min);
-	to_json(j["max"], box.max);
+	j["min"] = box.min;
+	j["max"] = box.max;
 }
 
 inline void from_json(const nlohmann::json& j, BoundingBox& box) {
-	from_json(j.at("min"), box.min);
-	from_json(j.at("max"), box.max);
+	box.min = j.at("min");
+	box.max = j.at("max");
 }
 
 inline void to_json(nlohmann::json& j, const Lens& lens) {
@@ -101,6 +55,10 @@ inline void to_json(nlohmann::json& j, const Lens& lens) {
 		j["ftheta_p4"] = lens.params[4];
 		j["w"] = lens.params[5];
 		j["h"] = lens.params[6];
+	} else if (lens.mode == ELensMode::LatLong) {
+		j["latlong"] = true;
+	} else if (lens.mode == ELensMode::Equirectangular) {
+		j["equirectangular"] = true;
 	}
 }
 
@@ -128,19 +86,23 @@ inline void from_json(const nlohmann::json& j, Lens& lens) {
 		lens.params[4] = j.at("ftheta_p4");
 		lens.params[5] = j.at("w");
 		lens.params[6] = j.at("h");
+	} else if (j.contains("latlong")) {
+		lens.mode = ELensMode::LatLong;
+	} else if (j.contains("equirectangular")) {
+		lens.mode = ELensMode::Equirectangular;
 	} else {
 		lens.mode = ELensMode::Perspective;
 	}
 }
 
 inline void from_json(const nlohmann::json& j, TrainingXForm& x) {
-	from_json(j.at("start"), x.start);
-	from_json(j.at("end"), x.end);
+	x.start = j.at("start");
+	x.end = j.at("end");
 }
 
 inline void to_json(nlohmann::json& j, const TrainingXForm& x) {
-	to_json(j["start"], x.start);
-	to_json(j["end"], x.end);
+	j["start"] = x.start;
+	j["end"] = x.end;
 }
 
 inline void to_json(nlohmann::json& j, const NerfDataset& dataset) {
@@ -149,18 +111,18 @@ inline void to_json(nlohmann::json& j, const NerfDataset& dataset) {
 	for (size_t i = 0; i < dataset.n_images; ++i) {
 		j["metadata"].emplace_back();
 		j["xforms"].emplace_back();
-		to_json(j["metadata"].at(i)["focal_length"], dataset.metadata[i].focal_length);
-		to_json(j["metadata"].at(i)["lens"], dataset.metadata[i].lens);
-		to_json(j["metadata"].at(i)["principal_point"], dataset.metadata[i].principal_point);
-		to_json(j["metadata"].at(i)["rolling_shutter"], dataset.metadata[i].rolling_shutter);
-		to_json(j["metadata"].at(i)["resolution"], dataset.metadata[i].resolution);
-		to_json(j["xforms"].at(i), dataset.xforms[i]);
+		j["metadata"].at(i)["focal_length"] = dataset.metadata[i].focal_length;
+		j["metadata"].at(i)["lens"] = dataset.metadata[i].lens;
+		j["metadata"].at(i)["principal_point"] = dataset.metadata[i].principal_point;
+		j["metadata"].at(i)["rolling_shutter"] = dataset.metadata[i].rolling_shutter;
+		j["metadata"].at(i)["resolution"] = dataset.metadata[i].resolution;
+		j["xforms"].at(i) = dataset.xforms[i];
 	}
 	j["render_aabb"] = dataset.render_aabb;
-	to_json(j["render_aabb_to_local"], dataset.render_aabb_to_local);
-	to_json(j["up"], dataset.up);
-	to_json(j["offset"], dataset.offset);
-	to_json(j["envmap_resolution"], dataset.envmap_resolution);
+	j["render_aabb_to_local"] = dataset.render_aabb_to_local;
+	j["up"] = dataset.up;
+	j["offset"] = dataset.offset;
+	j["envmap_resolution"] = dataset.envmap_resolution;
 	j["scale"] = dataset.scale;
 	j["aabb_scale"] = dataset.aabb_scale;
 	j["from_mitsuba"] = dataset.from_mitsuba;
@@ -178,34 +140,34 @@ inline void from_json(const nlohmann::json& j, NerfDataset& dataset) {
 
 	for (size_t i = 0; i < dataset.n_images; ++i) {
 		// read global defaults first
-		if (j.contains("lens")) from_json(j.at("lens"), dataset.metadata[i].lens);
+		if (j.contains("lens")) dataset.metadata[i].lens = j.at("lens");
 		// Legacy: "lens" used to be called "camera_distortion"
-		if (j.contains("camera_distortion")) from_json(j.at("camera_distortion"), dataset.metadata[i].lens);
-		if (j.contains("principal_point")) from_json(j.at("principal_point"), dataset.metadata[i].principal_point);
-		if (j.contains("rolling_shutter")) from_json(j.at("rolling_shutter"), dataset.metadata[i].rolling_shutter);
-		if (j.contains("focal_length")) from_json(j.at("focal_length"), dataset.metadata[i].focal_length);
-		if (j.contains("image_resolution")) from_json(j.at("image_resolution"), dataset.metadata[i].resolution);
+		if (j.contains("camera_distortion")) dataset.metadata[i].lens = j.at("camera_distortion");
+		if (j.contains("principal_point")) dataset.metadata[i].principal_point = j.at("principal_point");
+		if (j.contains("rolling_shutter")) dataset.metadata[i].rolling_shutter = j.at("rolling_shutter");
+		if (j.contains("focal_length")) dataset.metadata[i].focal_length = j.at("focal_length");
+		if (j.contains("image_resolution")) dataset.metadata[i].resolution = j.at("image_resolution");
 
-		from_json(j.at("xforms").at(i), dataset.xforms[i]);
-		if (j.contains("focal_lengths")) from_json(j.at("focal_lengths").at(i), dataset.metadata[i].focal_length);
+		dataset.xforms[i] = j.at("xforms").at(i);
+		if (j.contains("focal_lengths")) dataset.metadata[i].focal_length = j.at("focal_lengths").at(i);
 		if (j.contains("metadata")) {
 			auto &ji = j["metadata"].at(i);
-			from_json(ji.at("resolution"), dataset.metadata[i].resolution);
-			from_json(ji.at("focal_length"), dataset.metadata[i].focal_length);
-			from_json(ji.at("principal_point"), dataset.metadata[i].principal_point);
-			if (ji.contains("lens")) from_json(ji.at("lens"), dataset.metadata[i].lens);
+			dataset.metadata[i].resolution = ji.at("resolution");
+			dataset.metadata[i].focal_length = ji.at("focal_length");
+			dataset.metadata[i].principal_point = ji.at("principal_point");
+			if (ji.contains("lens")) dataset.metadata[i].lens = ji.at("lens");
 			// Legacy: "lens" used to be called "camera_distortion"
-			if (ji.contains("camera_distortion")) from_json(ji.at("camera_distortion"), dataset.metadata[i].lens);
+			if (ji.contains("camera_distortion")) dataset.metadata[i].lens = ji.at("camera_distortion");
 		}
 	}
 
 	dataset.render_aabb = j.at("render_aabb");
-	dataset.render_aabb_to_local = Eigen::Matrix3f::Identity();
-	if (j.contains("render_aabb_to_local")) from_json(j.at("render_aabb_to_local"), dataset.render_aabb_to_local);
+	dataset.render_aabb_to_local = mat3::identity();
+	if (j.contains("render_aabb_to_local")) dataset.render_aabb_to_local = j.at("render_aabb_to_local");
 
-	from_json(j.at("up"), dataset.up);
-	from_json(j.at("offset"), dataset.offset);
-	from_json(j.at("envmap_resolution"), dataset.envmap_resolution);
+	dataset.up = j.at("up");
+	dataset.offset = j.at("offset");
+	dataset.envmap_resolution = j.at("envmap_resolution");
 	dataset.scale = j.at("scale");
 	dataset.aabb_scale = j.at("aabb_scale");
 	dataset.from_mitsuba = j.at("from_mitsuba");
@@ -220,4 +182,4 @@ inline void from_json(const nlohmann::json& j, NerfDataset& dataset) {
 	dataset.n_extra_learnable_dims = j.value("n_extra_learnable_dims", 0);
 }
 
-NGP_NAMESPACE_END
+}

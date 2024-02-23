@@ -19,9 +19,11 @@ if (NOT NGP_DEPLOY)
 	set(NGP_VERSION "${NGP_VERSION}dev")
 endif()
 
+option(NGP_BUILD_EXECUTABLE "Build instant-ngp.exe?" ON)
 option(NGP_BUILD_WITH_GUI "Build with GUI support (requires GLFW and GLEW)?" ON)
-option(NGP_BUILD_WITH_VULKAN "Build with Vulkan to enable DLSS support?" ON)
 option(NGP_BUILD_WITH_OPTIX "Build with OptiX to enable hardware ray tracing?" ON)
+option(NGP_BUILD_WITH_PYTHON_BINDINGS "Build bindings that allow instrumenting instant-ngp with Python?" ON)
+option(NGP_BUILD_WITH_VULKAN "Build with Vulkan to enable DLSS support?" ON)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
@@ -77,6 +79,7 @@ else()
 endif()
 list(APPEND CUDA_NVCC_FLAGS "--extended-lambda")
 list(APPEND CUDA_NVCC_FLAGS "--expt-relaxed-constexpr")
+list(APPEND CUDA_NVCC_FLAGS "--use_fast_math")
 
 ###############################################################################
 # Dependencies
@@ -197,9 +200,9 @@ endif(NGP_BUILD_WITH_GUI)
 
 list(APPEND NGP_INCLUDE_DIRECTORIES
 	"dependencies"
-	"dependencies/eigen"
 	"dependencies/filesystem"
 	"dependencies/nanovdb"
+	"dependencies/NaturalSort"
 	"dependencies/tinylogger"
 )
 
@@ -215,9 +218,11 @@ if (NGP_BUILD_WITH_OPTIX)
 	list(APPEND NGP_DEFINITIONS -DNGP_OPTIX)
 endif()
 
-find_package(Python 3.7 COMPONENTS Interpreter Development)
-if (Python_FOUND)
-	add_subdirectory("dependencies/pybind11")
+if (NGP_BUILD_WITH_PYTHON_BINDINGS)
+	find_package(Python 3.7 COMPONENTS Interpreter Development)
+	if (Python_FOUND)
+		add_subdirectory("dependencies/pybind11")
+	endif()
 endif()
 
 # Compile zlib (only on Windows)
@@ -253,8 +258,7 @@ endif()
 list(APPEND NGP_SOURCES
 	${GUI_SOURCES}
 	src/camera_path.cu
-	src/common.cu
-	src/common_device.cu
+	src/common_host.cu
 	src/marching_cubes.cu
 	src/nerf_loader.cu
 	src/render_buffer.cu
@@ -265,7 +269,7 @@ list(APPEND NGP_SOURCES
 	src/testbed_volume.cu
 	src/thread_pool.cpp
 	src/tinyexr_wrapper.cu
-	src/tinyobj_loader_wrapper.cpp
+	src/tinyobj_loader_wrapper.cu
 	src/triangle_bvh.cu
 )
 
@@ -276,6 +280,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_BINARY_DIR})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR})
 
 get_filename_component(CUDA_COMPILER_BIN "${CMAKE_CUDA_COMPILER}" DIRECTORY)
+get_filename_component(CUDA_DIR "${CUDA_COMPILER_BIN}" DIRECTORY)
+set(CUDA_INCLUDE "${CUDA_DIR}/include")
 
 if (NGP_OPTIX)
 	add_library(optix_program OBJECT
@@ -328,10 +334,7 @@ target_include_directories(ngp PUBLIC ${NGP_INCLUDE_DIRECTORIES})
 target_link_directories(ngp PUBLIC ${NGP_LINK_DIRECTORIES})
 target_link_libraries(ngp PUBLIC ${NGP_LIBRARIES} tiny-cuda-nn)
 
-add_executable(instant-ngp src/main.cu)
-target_link_libraries(instant-ngp PRIVATE ngp)
-
-# Copy DLSS shared libraries
+# Copy shared libraries to the binary directory as needed
 if (NGP_VULKAN)
 	set(NGX_BUILD_DIR "$<IF:$<CONFIG:Debug>,dev,rel>")
 	if (MSVC)
@@ -340,23 +343,39 @@ if (NGP_VULKAN)
 		set(NGX_SHARED_LIB "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/dlss/lib/Linux_x86_64/${NGX_BUILD_DIR}/libnvidia-ngx-dlss.so.*")
 	endif()
 
-	add_custom_command(TARGET instant-ngp POST_BUILD
-		COMMAND ${CMAKE_COMMAND} -E copy "${NGX_SHARED_LIB}" $<TARGET_FILE_DIR:instant-ngp>
-		COMMAND_EXPAND_LISTS
-	)
+	add_custom_command(TARGET ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy "${NGX_SHARED_LIB}" "${CMAKE_CURRENT_BINARY_DIR}" COMMAND_EXPAND_LISTS)
 endif()
 
 if (MSVC)
-	# Copy CUDA runtime DLLs to the build directory so that Python can find them.
 	file(GLOB CUDA_DLLS "${CUDA_COMPILER_BIN}/cudart64*.dll")
 	if (CUDA_DLLS)
-		add_custom_command(TARGET instant-ngp POST_BUILD
-			COMMAND ${CMAKE_COMMAND} -E copy ${CUDA_DLLS} $<TARGET_FILE_DIR:instant-ngp>
-			COMMAND_EXPAND_LISTS
-		)
+		add_custom_command(TARGET ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy ${CUDA_DLLS} "${CMAKE_CURRENT_BINARY_DIR}" COMMAND_EXPAND_LISTS)
 	endif()
 endif()
 
+if (NGP_BUILD_EXECUTABLE)
+	add_executable(instant-ngp src/main.cu)
+	target_link_libraries(instant-ngp PRIVATE ngp)
+
+	# Link the executable to the project directory and copy over DLLs such that instant-ngp can be invoked without going into the build folder.
+	set(NGP_BINARY_FILE "\"${CMAKE_CURRENT_SOURCE_DIR}/$<TARGET_FILE_NAME:instant-ngp>\"")
+	if (MSVC)
+		add_custom_command(TARGET instant-ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:instant-ngp> ${CMAKE_CURRENT_SOURCE_DIR})
+		file(GLOB NGP_REQUIRED_DLLS "${CUDA_COMPILER_BIN}/cudart64*.dll")
+		if (NGP_VULKAN)
+			list(APPEND NGP_REQUIRED_DLLS "${NGX_SHARED_LIB}")
+		endif()
+		if (NGP_REQUIRED_DLLS)
+			add_custom_command(TARGET instant-ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy ${NGP_REQUIRED_DLLS} ${CMAKE_CURRENT_SOURCE_DIR} COMMAND_EXPAND_LISTS)
+		endif()
+	else()
+		add_custom_command(TARGET instant-ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE:instant-ngp> "${NGP_BINARY_FILE}")
+
+		if (NGP_VULKAN)
+			add_custom_command(TARGET instant-ngp POST_BUILD COMMAND "ln" -s -f "${NGX_SHARED_LIB}" "${CMAKE_CURRENT_SOURCE_DIR}/")
+		endif()
+	endif()
+endif(NGP_BUILD_EXECUTABLE)
 
 if (Python_FOUND)
 	add_library(pyngp SHARED src/python_api.cu)
@@ -364,22 +383,4 @@ if (Python_FOUND)
 	target_link_libraries(pyngp PRIVATE ngp PUBLIC ${PYTHON_LIBRARIES} pybind11::module)
 	target_compile_definitions(pyngp PUBLIC -DNGP_PYTHON)
 	pybind11_extension(pyngp)
-endif()
-
-# Link the executable to the project directory and copy over DLLs such that instant-ngp can be invoked without going into the build folder.
-set(NGP_BINARY_FILE "\"${CMAKE_CURRENT_SOURCE_DIR}/$<TARGET_FILE_NAME:instant-ngp>\"")
-if (MSVC)
-	add_custom_command(TARGET instant-ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:instant-ngp> ${CMAKE_CURRENT_SOURCE_DIR})
-	file(GLOB NGP_REQUIRED_DLLS "${CUDA_COMPILER_BIN}/cudart64*.dll")
-	if (NGP_VULKAN)
-		list(APPEND NGP_REQUIRED_DLLS "${NGX_SHARED_LIB}")
-	endif()
-	if (NGP_REQUIRED_DLLS)
-		add_custom_command(TARGET instant-ngp POST_BUILD
-			COMMAND ${CMAKE_COMMAND} -E copy ${NGP_REQUIRED_DLLS} ${CMAKE_CURRENT_SOURCE_DIR}
-			COMMAND_EXPAND_LISTS
-		)
-	endif()
-else()
-	add_custom_command(TARGET instant-ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE:instant-ngp> "${NGP_BINARY_FILE}")
 endif()

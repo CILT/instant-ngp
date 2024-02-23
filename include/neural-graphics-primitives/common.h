@@ -15,76 +15,29 @@
 
 #pragma once
 
-
-#include <tinylogger/tinylogger.h>
-
-// Eigen uses __device__ __host__ on a bunch of defaulted constructors.
-// This doesn't actually cause unwanted behavior, but does cause NVCC
-// to emit this diagnostic.
-// nlohmann::json produces a comparison with zero in one of its templates,
-// which can also safely be ignored.
-#ifdef __NVCC__
-#  ifdef __NVCC_DIAG_PRAGMA_SUPPORT__
-#    pragma nv_diag_suppress = esa_on_defaulted_function_ignored
-#    pragma nv_diag_suppress = unsigned_compare_with_zero
-#  else
-#    pragma diag_suppress = esa_on_defaulted_function_ignored
-#    pragma diag_suppress = unsigned_compare_with_zero
-#  endif
+#ifdef _WIN32
+#  define NOMINMAX
 #endif
-#include <Eigen/Dense>
 
-#define NGP_NAMESPACE_BEGIN namespace ngp {
-#define NGP_NAMESPACE_END }
+#include <tiny-cuda-nn/common.h>
+using namespace tcnn;
+
 
 #if defined(__CUDA_ARCH__)
-	#if defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
-		#define NGP_PRAGMA_UNROLL _Pragma("unroll")
-		#define NGP_PRAGMA_NO_UNROLL _Pragma("unroll 1")
-	#else
-		#define NGP_PRAGMA_UNROLL #pragma unroll
-		#define NGP_PRAGMA_NO_UNROLL #pragma unroll 1
-	#endif
+	#define NGP_PRAGMA_UNROLL _Pragma("unroll")
+	#define NGP_PRAGMA_NO_UNROLL _Pragma("unroll 1")
 #else
 	#define NGP_PRAGMA_UNROLL
 	#define NGP_PRAGMA_NO_UNROLL
 #endif
 
-#include <filesystem/path.h>
-
-#include <chrono>
-#include <functional>
-
-#if defined(__NVCC__) || (defined(__clang__) && defined(__CUDA__))
+#if defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__))
 #define NGP_HOST_DEVICE __host__ __device__
 #else
 #define NGP_HOST_DEVICE
 #endif
 
-NGP_NAMESPACE_BEGIN
-
-namespace fs = filesystem;
-
-bool is_wsl();
-
-fs::path get_executable_dir();
-fs::path get_root_dir();
-
-#ifdef _WIN32
-std::string utf16_to_utf8(const std::wstring& utf16);
-std::wstring utf8_to_utf16(const std::string& utf16);
-std::wstring native_string(const fs::path& path);
-#else
-std::string native_string(const fs::path& path);
-#endif
-
-bool ends_with(const std::string& str, const std::string& ending);
-bool ends_with_case_insensitive(const std::string& str, const std::string& ending);
-
-using Vector2i32 = Eigen::Matrix<uint32_t, 2, 1>;
-using Vector3i16 = Eigen::Matrix<uint16_t, 3, 1>;
-using Vector4i16 = Eigen::Matrix<uint16_t, 4, 1>;
-using Vector4i32 = Eigen::Matrix<uint32_t, 4, 1>;
+namespace ngp {
 
 enum class EMeshRenderMode : int {
 	Off,
@@ -184,9 +137,10 @@ enum class ETestbedMode : int {
 	None,
 };
 
-ETestbedMode mode_from_scene(const std::string& scene);
-ETestbedMode mode_from_string(const std::string& str);
-std::string to_string(ETestbedMode);
+enum class EMlpAlgorithm : int {
+	MMA,
+	FMA,
+};
 
 enum class ESDFGroundTruthMode : int {
 	RaytracedMesh,
@@ -195,10 +149,10 @@ enum class ESDFGroundTruthMode : int {
 };
 
 struct Ray {
-	Eigen::Vector3f o;
-	Eigen::Vector3f d;
+	vec3 o;
+	vec3 d;
 
-	NGP_HOST_DEVICE Eigen::Vector3f operator()(float t) const {
+	NGP_HOST_DEVICE vec3 operator()(float t) const {
 		return o + t * d;
 	}
 
@@ -206,14 +160,14 @@ struct Ray {
 		o += d * t;
 	}
 
-	NGP_HOST_DEVICE float distance_to(const Eigen::Vector3f& p) const {
-		Eigen::Vector3f nearest = p - o;
-		nearest -= d * nearest.dot(d) / d.squaredNorm();
-		return nearest.norm();
+	NGP_HOST_DEVICE float distance_to(const vec3& p) const {
+		vec3 nearest = p - o;
+		nearest -= d * dot(nearest, d) / length2(d);
+		return length(nearest);
 	}
 
 	NGP_HOST_DEVICE bool is_valid() const {
-		return d != Eigen::Vector3f::Zero();
+		return d != vec3(0.0f);
 	}
 
 	static NGP_HOST_DEVICE Ray invalid() {
@@ -222,8 +176,12 @@ struct Ray {
 };
 
 struct TrainingXForm {
-	Eigen::Matrix<float, 3, 4> start;
-	Eigen::Matrix<float, 3, 4> end;
+	NGP_HOST_DEVICE bool operator==(const TrainingXForm& other) const {
+		return start == other.start && end == other.end;
+	}
+
+	mat4x3 start;
+	mat4x3 end;
 };
 
 enum class ELensMode : int {
@@ -236,7 +194,7 @@ enum class ELensMode : int {
 };
 static constexpr const char* LensModeStr = "Perspective\0OpenCV\0F-Theta\0LatLong\0OpenCV Fisheye\0Equirectangular\0\0";
 
-inline bool supports_dlss(ELensMode mode) {
+inline NGP_HOST_DEVICE bool supports_dlss(ELensMode mode) {
 	return mode == ELensMode::Perspective || mode == ELensMode::OpenCV || mode == ELensMode::OpenCVFisheye;
 }
 
@@ -244,10 +202,6 @@ struct Lens {
 	ELensMode mode = ELensMode::Perspective;
 	float params[7] = {};
 };
-
-inline NGP_HOST_DEVICE float sign(float x) {
-	return copysignf(1.0, x);
-}
 
 inline NGP_HOST_DEVICE uint32_t binary_search(float val, const float* data, uint32_t length) {
 	if (length == 0) {
@@ -271,116 +225,41 @@ inline NGP_HOST_DEVICE uint32_t binary_search(float val, const float* data, uint
 		}
 	}
 
-	return std::min(first, length-1);
+	return min(first, length-1);
 }
-
-inline std::string replace_all(std::string str, const std::string& a, const std::string& b) {
-	std::string::size_type n = 0;
-	while ((n = str.find(a, n)) != std::string::npos) {
-		str.replace(n, a.length(), b);
-		n += b.length();
-	}
-	return str;
-}
-
-template <typename T>
-std::string join(const T& components, const std::string& delim) {
-	std::ostringstream s;
-	for (const auto& component : components) {
-		if (&components[0] != &component) {
-			s << delim;
-		}
-		s << component;
-	}
-
-	return s.str();
-}
-
-enum class EEmaType {
-	Time,
-	Step,
-};
-
-class Ema {
-public:
-	Ema(EEmaType type, float half_life)
-	: m_type{type}, m_decay{std::pow(0.5f, 1.0f / half_life)}, m_creation_time{std::chrono::steady_clock::now()} {}
-
-	int64_t current_progress() {
-		if (m_type == EEmaType::Time) {
-			auto now = std::chrono::steady_clock::now();
-			return std::chrono::duration_cast<std::chrono::milliseconds>(now - m_creation_time).count();
-		} else {
-			return m_last_progress + 1;
-		}
-	}
-
-	void update(float val) {
-		int64_t cur = current_progress();
-		int64_t elapsed = cur - m_last_progress;
-		m_last_progress = cur;
-
-		float decay = std::pow(m_decay, elapsed);
-		m_val = val;
-		m_ema_val = decay * m_ema_val + (1.0f - decay) * val;
-	}
-
-	void set(float val) {
-		m_last_progress = current_progress();
-		m_val = m_ema_val = val;
-	}
-
-	float val() const {
-		return m_val;
-	}
-
-	float ema_val() const {
-		return m_ema_val;
-	}
-
-private:
-	float m_val = 0.0f;
-	float m_ema_val = 0.0f;
-	EEmaType m_type;
-	float m_decay;
-
-	int64_t m_last_progress = 0;
-	std::chrono::time_point<std::chrono::steady_clock> m_creation_time;
-};
 
 template <typename T>
 struct Buffer2DView {
 	T* data = nullptr;
-	Eigen::Vector2i resolution = Eigen::Vector2i::Zero();
+	ivec2 resolution = 0;
 
 	// Lookup via integer pixel position (no bounds checking)
-	NGP_HOST_DEVICE T at(const Eigen::Vector2i& xy) const {
-		return data[xy.x() + xy.y() * resolution.x()];
+	NGP_HOST_DEVICE T at(const ivec2& px) const {
+		return data[px.x + px.y * resolution.x];
 	}
 
 	// Lookup via UV coordinates in [0,1]^2
-	NGP_HOST_DEVICE T at(const Eigen::Vector2f& uv) const {
-		Eigen::Vector2i xy = resolution.cast<float>().cwiseProduct(uv).cast<int>().cwiseMax(0).cwiseMin(resolution - Eigen::Vector2i::Ones());
-		return at(xy);
+	NGP_HOST_DEVICE T at(const vec2& uv) const {
+		ivec2 px = clamp(ivec2(vec2(resolution) * uv), 0, resolution - 1);
+		return at(px);
 	}
 
 	// Lookup via UV coordinates in [0,1]^2 and LERP the nearest texels
-	NGP_HOST_DEVICE T at_lerp(const Eigen::Vector2f& uv) const {
-		const Eigen::Vector2f xy_float = resolution.cast<float>().cwiseProduct(uv);
-		const Eigen::Vector2i xy = xy_float.cast<int>();
+	NGP_HOST_DEVICE T at_lerp(const vec2& uv) const {
+		const vec2 px_float = vec2(resolution) * uv;
+		const ivec2 px = ivec2(px_float);
 
-		const Eigen::Vector2f weight = xy_float - xy.cast<float>();
+		const vec2 weight = px_float - vec2(px);
 
-		auto read_val = [&](Eigen::Vector2i pos) {
-			pos = pos.cwiseMax(0).cwiseMin(resolution - Eigen::Vector2i::Ones());
-			return at(pos);
+		auto read_val = [&](ivec2 pos) {
+			return at(clamp(pos, 0, resolution - 1));
 		};
 
 		return (
-			(1 - weight.x()) * (1 - weight.y()) * read_val({xy.x(), xy.y()}) +
-			(weight.x()) * (1 - weight.y()) * read_val({xy.x()+1, xy.y()}) +
-			(1 - weight.x()) * (weight.y()) * read_val({xy.x(), xy.y()+1}) +
-			(weight.x()) * (weight.y()) * read_val({xy.x()+1, xy.y()+1})
+			(1 - weight.x) * (1 - weight.y) * read_val({px.x, px.y}) +
+			(weight.x) * (1 - weight.y) * read_val({px.x+1, px.y}) +
+			(1 - weight.x) * (weight.y) * read_val({px.x, px.y+1}) +
+			(weight.x) * (weight.y) * read_val({px.x+1, px.y+1})
 		);
 	}
 
@@ -389,12 +268,4 @@ struct Buffer2DView {
 	}
 };
 
-uint8_t* load_stbi(const fs::path& path, int* width, int* height, int* comp, int req_comp);
-float* load_stbi_float(const fs::path& path, int* width, int* height, int* comp, int req_comp);
-uint16_t* load_stbi_16(const fs::path& path, int* width, int* height, int* comp, int req_comp);
-bool is_hdr_stbi(const fs::path& path);
-int write_stbi(const fs::path& path, int width, int height, int comp, const uint8_t* pixels, int quality = 100);
-
-FILE* native_fopen(const fs::path& path, const char* mode);
-
-NGP_NAMESPACE_END
+}
