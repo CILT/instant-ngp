@@ -15,16 +15,12 @@
  *          view, hand, and eye poses, as well as controller inputs.
  */
 
-#define NOMINMAX
-
 #include <neural-graphics-primitives/common_device.cuh>
 #include <neural-graphics-primitives/marching_cubes.h>
 #include <neural-graphics-primitives/openxr_hmd.h>
 #include <neural-graphics-primitives/render_buffer.h>
 
 #include <openxr/openxr_reflection.h>
-
-#include <fmt/format.h>
 
 #include <imgui/imgui.h>
 
@@ -40,10 +36,7 @@
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers" //TODO: XR struct are uninitiaized apart from their type
 #endif
 
-using namespace Eigen;
-using namespace tcnn;
-
-NGP_NAMESPACE_BEGIN
+namespace ngp {
 
 // function XrEnumStr turns enum into string for printing
 // uses expansion macro and data provided in openxr_reflection.h
@@ -167,7 +160,7 @@ OpenXRHMD::OpenXRHMD(wl_display* display) {
 	// tlog::success() << " "
 	// 	<< " depth=" << (m_supports_composition_layer_depth ? "true" : "false")
 	// 	<< " mask=" << (m_supports_hidden_area_mask ? "true" : "false")
-	// 	<< " eye=" << (m_supports_hidden_area_mask ? "true" : "false")
+	// 	<< " eye=" << (m_supports_eye_tracking ? "true" : "false")
 	// 	;
 }
 
@@ -425,34 +418,42 @@ void OpenXRHMD::init_check_for_xr_blend_mode() {
 	// enumerate environment blend modes
 	uint32_t size;
 	XR_CHECK_THROW(xrEnumerateEnvironmentBlendModes(m_instance, m_system_id, m_view_configuration_type, 0, &size, nullptr));
-	m_environment_blend_modes.resize(size);
+	std::vector<XrEnvironmentBlendMode> supported_blend_modes(size);
 	XR_CHECK_THROW(xrEnumerateEnvironmentBlendModes(
 		m_instance,
 		m_system_id,
 		m_view_configuration_type,
 		size,
 		&size,
-		m_environment_blend_modes.data()
+		supported_blend_modes.data()
 	));
 
+	if (supported_blend_modes.empty()) {
+		throw std::runtime_error{"No OpenXR environment blend modes found"};
+	}
+
+	std::sort(std::begin(supported_blend_modes), std::end(supported_blend_modes));
 	if (m_print_environment_blend_modes) {
-		tlog::info() << fmt::format("Environment Blend Modes ({}):", m_environment_blend_modes.size());
+		tlog::info() << fmt::format("Environment Blend Modes ({}):", supported_blend_modes.size());
 	}
 
-	bool found = false;
-	for (const auto& m : m_environment_blend_modes) {
+	m_supported_environment_blend_modes.resize(supported_blend_modes.size());
+	m_supported_environment_blend_modes_imgui_string.clear();
+	for (size_t i = 0; i < supported_blend_modes.size(); ++i) {
 		if (m_print_environment_blend_modes) {
-			tlog::info() << fmt::format("\t{}", XrEnumStr(m));
+			tlog::info() << fmt::format("\t{}", XrEnumStr(supported_blend_modes[i]));
 		}
 
-		if (m == m_environment_blend_mode) {
-			found = true;
-		}
+		auto b = (EEnvironmentBlendMode)supported_blend_modes[i];
+		m_supported_environment_blend_modes[i] = b;
+
+		auto b_str = to_string(b);
+		std::copy(std::begin(b_str), std::end(b_str), std::back_inserter(m_supported_environment_blend_modes_imgui_string));
+		m_supported_environment_blend_modes_imgui_string.emplace_back('\0');
 	}
 
-	if (!found) {
-		throw std::runtime_error{fmt::format("OpenXR environment blend mode {} not found", XrEnumStr(m_environment_blend_mode))};
-	}
+	m_supported_environment_blend_modes_imgui_string.emplace_back('\0');
+	m_environment_blend_mode = m_supported_environment_blend_modes.front();
 }
 
 void OpenXRHMD::init_xr_actions() {
@@ -794,7 +795,7 @@ void OpenXRHMD::init_open_gl_shaders() {
 	}
 }
 
-void OpenXRHMD::session_state_change(XrSessionState state, ControlFlow& flow) {
+void OpenXRHMD::session_state_change(XrSessionState state, EControlFlow& flow) {
 	//tlog::info() << fmt::format("New session state {}", XrEnumStr(state));
 	switch (state) {
 		case XR_SESSION_STATE_READY: {
@@ -808,11 +809,11 @@ void OpenXRHMD::session_state_change(XrSessionState state, ControlFlow& flow) {
 			break;
 		}
 		case XR_SESSION_STATE_EXITING: {
-			flow = ControlFlow::QUIT;
+			flow = EControlFlow::Quit;
 			break;
 		}
 		case XR_SESSION_STATE_LOSS_PENDING: {
-			flow = ControlFlow::RESTART;
+			flow = EControlFlow::Restart;
 			break;
 		}
 		default: {
@@ -821,9 +822,9 @@ void OpenXRHMD::session_state_change(XrSessionState state, ControlFlow& flow) {
 	}
 }
 
-OpenXRHMD::ControlFlow OpenXRHMD::poll_events() {
+OpenXRHMD::EControlFlow OpenXRHMD::poll_events() {
 	bool more = true;
-	ControlFlow flow = ControlFlow::CONTINUE;
+	EControlFlow flow = EControlFlow::Continue;
 	while (more) {
 		// poll events
 		XrEventDataBuffer event {XR_TYPE_EVENT_DATA_BUFFER, nullptr};
@@ -844,7 +845,7 @@ OpenXRHMD::ControlFlow OpenXRHMD::poll_events() {
 				}
 
 				case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING: {
-					flow = ControlFlow::RESTART;
+					flow = EControlFlow::Restart;
 					break;
 				}
 
@@ -869,15 +870,15 @@ OpenXRHMD::ControlFlow OpenXRHMD::poll_events() {
 	return flow;
 }
 
-__global__ void read_hidden_area_mask_kernel(const Vector2i resolution, cudaSurfaceObject_t surface, uint8_t* __restrict__ mask) {
+__global__ void read_hidden_area_mask_kernel(const ivec2 resolution, cudaSurfaceObject_t surface, uint8_t* __restrict__ mask) {
 	uint32_t x = threadIdx.x + blockDim.x * blockIdx.x;
 	uint32_t y = threadIdx.y + blockDim.y * blockIdx.y;
 
-	if (x >= resolution.x() || y >= resolution.y()) {
+	if (x >= resolution.x || y >= resolution.y) {
 		return;
 	}
 
-	uint32_t idx = x + resolution.x() * y;
+	uint32_t idx = x + resolution.x * y;
 	surf2Dread(&mask[idx], surface, x, y);
 }
 
@@ -913,7 +914,7 @@ std::shared_ptr<Buffer2D<uint8_t>> OpenXRHMD::rasterize_hidden_area_mask(uint32_
 
 	CUDA_CHECK_THROW(cudaDeviceSynchronize());
 
-	Vector2i size = {view.subImage.imageRect.extent.width, view.subImage.imageRect.extent.height};
+	ivec2 size = {view.subImage.imageRect.extent.width, view.subImage.imageRect.extent.height};
 
 	bool tex = glIsEnabled(GL_TEXTURE_2D);
 	bool depth = glIsEnabled(GL_DEPTH_TEST);
@@ -940,7 +941,7 @@ std::shared_ptr<Buffer2D<uint8_t>> OpenXRHMD::rasterize_hidden_area_mask(uint32_
 	GLenum draw_buffers[1] = {GL_COLOR_ATTACHMENT0};
 	glDrawBuffers(1, draw_buffers);
 
-	glViewport(0, 0, size.x(), size.y());
+	glViewport(0, 0, size.x, size.y);
 
 	// Draw hidden area mask
 	GLuint vao;
@@ -991,7 +992,7 @@ std::shared_ptr<Buffer2D<uint8_t>> OpenXRHMD::rasterize_hidden_area_mask(uint32_
 	std::shared_ptr<Buffer2D<uint8_t>> mask = std::make_shared<Buffer2D<uint8_t>>(size);
 
 	const dim3 threads = { 16, 8, 1 };
-	const dim3 blocks = { div_round_up((uint32_t)size.x(), threads.x), div_round_up((uint32_t)size.y(), threads.y), 1 };
+	const dim3 blocks = { div_round_up((uint32_t)size.x, threads.x), div_round_up((uint32_t)size.y, threads.y), 1 };
 
 	read_hidden_area_mask_kernel<<<blocks, threads>>>(size, mask_texture.surface(), mask->data());
 	CUDA_CHECK_THROW(cudaDeviceSynchronize());
@@ -999,33 +1000,33 @@ std::shared_ptr<Buffer2D<uint8_t>> OpenXRHMD::rasterize_hidden_area_mask(uint32_
 	return mask;
 }
 
-Matrix<float, 3, 4> convert_xr_matrix_to_eigen(const XrMatrix4x4f& m) {
-	Matrix<float, 3, 4> out;
+mat4x3 convert_xr_matrix_to_glm(const XrMatrix4x4f& m) {
+	mat4x3 out;
 
 	for (size_t i = 0; i < 3; ++i) {
 		for (size_t j = 0; j < 4; ++j) {
-			out(i, j) = m.m[i + j * 4];
+			out[j][i] = m.m[i + j * 4];
 		}
 	}
 
 	// Flip Y and Z axes to match NGP conventions
-	out(0, 1) *= -1.f;
-	out(1, 0) *= -1.f;
+	out[1][0] *= -1.f;
+	out[0][1] *= -1.f;
 
-	out(0, 2) *= -1.f;
-	out(2, 0) *= -1.f;
+	out[2][0] *= -1.f;
+	out[0][2] *= -1.f;
 
-	out(1, 3) *= -1.f;
-	out(2, 3) *= -1.f;
+	out[3][1] *= -1.f;
+	out[3][2] *= -1.f;
 
 	return out;
 }
 
-Matrix<float, 3, 4> convert_xr_pose_to_eigen(const XrPosef& pose) {
+mat4x3 convert_xr_pose_to_eigen(const XrPosef& pose) {
 	XrMatrix4x4f matrix;
 	XrVector3f unit_scale{1.0f, 1.0f, 1.0f};
 	XrMatrix4x4f_CreateTranslationRotationScale(&matrix, &pose.position, &pose.orientation, &unit_scale);
-	return convert_xr_matrix_to_eigen(matrix);
+	return convert_xr_matrix_to_glm(matrix);
 }
 
 OpenXRHMD::FrameInfoPtr OpenXRHMD::begin_frame() {
@@ -1150,10 +1151,10 @@ OpenXRHMD::FrameInfoPtr OpenXRHMD::begin_frame() {
 			XR_CHECK_THROW(xrGetActionStateVector2f(m_session, &get_info, &thumbstick_state));
 
 			if (thumbstick_state.isActive) {
-				frame_info->hands[i].thumbstick.x() = thumbstick_state.currentState.x;
-				frame_info->hands[i].thumbstick.y() = thumbstick_state.currentState.y;
+				frame_info->hands[i].thumbstick.x = thumbstick_state.currentState.x;
+				frame_info->hands[i].thumbstick.y = thumbstick_state.currentState.y;
 			} else {
-				frame_info->hands[i].thumbstick = Vector2f::Zero();
+				frame_info->hands[i].thumbstick = vec2(0.0f);
 			}
 		}
 
@@ -1190,8 +1191,8 @@ OpenXRHMD::FrameInfoPtr OpenXRHMD::begin_frame() {
 			frame_info->hands[i].grabbing = frame_info->hands[i].grab_strength >= 0.5f;
 
 			if (frame_info->hands[i].grabbing) {
-				frame_info->hands[i].prev_grab_pos = was_grabbing ? frame_info->hands[i].grab_pos : frame_info->hands[i].pose.col(3);
-				frame_info->hands[i].grab_pos = frame_info->hands[i].pose.col(3);
+				frame_info->hands[i].prev_grab_pos = was_grabbing ? frame_info->hands[i].grab_pos : frame_info->hands[i].pose[3];
+				frame_info->hands[i].grab_pos = frame_info->hands[i].pose[3];
 			}
 		}
 	}
@@ -1200,7 +1201,7 @@ OpenXRHMD::FrameInfoPtr OpenXRHMD::begin_frame() {
 	return frame_info;
 }
 
-void OpenXRHMD::end_frame(FrameInfoPtr frame_info, float znear, float zfar) {
+void OpenXRHMD::end_frame(FrameInfoPtr frame_info, float znear, float zfar, bool submit_depth) {
 	std::vector<XrCompositionLayerProjectionView> layer_projection_views(frame_info->views.size());
 	for (size_t i = 0; i < layer_projection_views.size(); ++i) {
 		auto& v = frame_info->views[i];
@@ -1216,16 +1217,23 @@ void OpenXRHMD::end_frame(FrameInfoPtr frame_info, float znear, float zfar) {
 			XR_CHECK_THROW(xrReleaseSwapchainImage(v.depth_info.subImage.swapchain, &release_info));
 			v.depth_info.nearZ = znear;
 			v.depth_info.farZ = zfar;
-			// The following line being commented means that our provided depth buffer
-			// _isn't_ actually passed to the runtime for reprojection. So far,
-			// experimentation has shown that runtimes do a better job at reprojection
-			// without getting a depth buffer from us, so we leave it disabled for now.
-			// view.next = &v.depth_info;
+
+			// Submitting the depth buffer to the runtime for reprojection is optional,
+			// because, while depth-based reprojection can make the experience smoother,
+			// it also results in distortion around geometric edges. Many users prefer
+			// a more stuttery experience without this distortion.
+			if (submit_depth) {
+				view.next = &v.depth_info;
+			}
 		}
 	}
 
 	XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
 	layer.space = m_space;
+	if (m_environment_blend_mode != EEnvironmentBlendMode::Opaque) {
+		layer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+	}
+
 	layer.viewCount = uint32_t(layer_projection_views.size());
 	layer.views = layer_projection_views.data();
 
@@ -1236,13 +1244,13 @@ void OpenXRHMD::end_frame(FrameInfoPtr frame_info, float znear, float zfar) {
 
 	XrFrameEndInfo frame_end_info{XR_TYPE_FRAME_END_INFO};
 	frame_end_info.displayTime = m_frame_state.predictedDisplayTime;
-	frame_end_info.environmentBlendMode = m_environment_blend_mode;
+	frame_end_info.environmentBlendMode = (XrEnvironmentBlendMode)m_environment_blend_mode;
 	frame_end_info.layerCount = (uint32_t)layers.size();
 	frame_end_info.layers = layers.data();
 	XR_CHECK_THROW(xrEndFrame(m_session, &frame_end_info));
 }
 
-NGP_NAMESPACE_END
+}
 
 #ifdef __GNUC__
 #pragma GCC diagnostic pop

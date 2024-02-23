@@ -19,10 +19,10 @@
 #include <json/json.hpp>
 
 #include <pybind11/pybind11.h>
-#include <pybind11/eigen.h>
 #include <pybind11/functional.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
+#include <tiny-cuda-nn/vec_pybind11.h>
 #include <pybind11_json/pybind11_json.hpp>
 
 #include <filesystem/path.h>
@@ -37,15 +37,10 @@
 #  include <GLFW/glfw3.h>
 #endif
 
-using namespace tcnn;
-using namespace Eigen;
 using namespace nlohmann;
 namespace py = pybind11;
 
-using namespace pybind11::literals; // to bring in the `_a` literal
-
-NGP_NAMESPACE_BEGIN
-
+namespace ngp {
 
 void Testbed::Nerf::Training::set_image(int frame_idx, pybind11::array_t<float> img, pybind11::array_t<float> depth_img, float depth_scale) {
 	if (frame_idx < 0 || frame_idx >= dataset.n_images) {
@@ -64,7 +59,7 @@ void Testbed::Nerf::Training::set_image(int frame_idx, pybind11::array_t<float> 
 
 	py::buffer_info depth_buf = depth_img.request();
 
-	dataset.set_training_image(frame_idx, {img_buf.shape[1], img_buf.shape[0]}, (const void*)img_buf.ptr, (const float*)depth_buf.ptr, depth_scale, false, EImageDataType::Float, EDepthDataType::Float);
+	dataset.set_training_image(frame_idx, {(int)img_buf.shape[1], (int)img_buf.shape[0]}, (const void*)img_buf.ptr, (const float*)depth_buf.ptr, depth_scale, false, EImageDataType::Float, EDepthDataType::Float);
 }
 
 void Testbed::override_sdf_training_data(py::array_t<float> points, py::array_t<float> distances) {
@@ -76,14 +71,14 @@ void Testbed::override_sdf_training_data(py::array_t<float> points, py::array_t<
 		return;
 	}
 
-	std::vector<Vector3f> points_cpu(points_buf.shape[0]);
+	std::vector<vec3> points_cpu(points_buf.shape[0]);
 	std::vector<float> distances_cpu(distances_buf.shape[0]);
 
 	for (size_t i = 0; i < points_cpu.size(); ++i) {
-		Vector3f pos = *((Vector3f*)points_buf.ptr + i);
+		vec3 pos = *((vec3*)points_buf.ptr + i);
 		float dist = *((float*)distances_buf.ptr + i);
 
-		pos = (pos - m_raw_aabb.min) / m_sdf.mesh_scale + 0.5f * (Vector3f::Ones() - (m_raw_aabb.max - m_raw_aabb.min) / m_sdf.mesh_scale);
+		pos = (pos - m_raw_aabb.min) / m_sdf.mesh_scale + 0.5f * (vec3(1.0f) - (m_raw_aabb.max - m_raw_aabb.min) / m_sdf.mesh_scale);
 		dist /= m_sdf.mesh_scale;
 
 		points_cpu[i] = pos;
@@ -99,8 +94,8 @@ void Testbed::override_sdf_training_data(py::array_t<float> points, py::array_t<
 	m_sdf.training.generate_sdf_data_online = false;
 }
 
-pybind11::dict Testbed::compute_marching_cubes_mesh(Eigen::Vector3i res3d, BoundingBox aabb, float thresh) {
-	Matrix3f render_aabb_to_local = Matrix3f::Identity();
+pybind11::dict Testbed::compute_marching_cubes_mesh(ivec3 res3d, BoundingBox aabb, float thresh) {
+	mat3 render_aabb_to_local = mat3::identity();
 	if (aabb.is_empty()) {
 		aabb = m_testbed_mode == ETestbedMode::Nerf ? m_render_aabb : m_aabb;
 		render_aabb_to_local = m_render_aabb_to_local;
@@ -117,12 +112,12 @@ pybind11::dict Testbed::compute_marching_cubes_mesh(Eigen::Vector3i res3d, Bound
 	CUDA_CHECK_THROW(cudaMemcpy(cpucolors.request().ptr, m_mesh.vert_colors.data() , m_mesh.vert_colors.size() * 3 * sizeof(float), cudaMemcpyDeviceToHost));
 	CUDA_CHECK_THROW(cudaMemcpy(cpuindices.request().ptr, m_mesh.indices.data() , m_mesh.indices.size() * sizeof(int), cudaMemcpyDeviceToHost));
 
-	Eigen::Vector3f* ns = (Eigen::Vector3f*)cpunormals.request().ptr;
+	vec3* ns = (vec3*)cpunormals.request().ptr;
 	for (size_t i = 0; i < m_mesh.vert_normals.size(); ++i) {
-		ns[i].normalize();
+		ns[i] = normalize(ns[i]);
 	}
 
-	return py::dict("V"_a=cpuverts, "N"_a=cpunormals, "C"_a=cpucolors, "F"_a=cpuindices);
+	return py::dict(py::arg("V")=cpuverts, py::arg("N")=cpunormals, py::arg("C")=cpucolors, py::arg("F")=cpuindices);
 }
 
 py::array_t<float> Testbed::render_to_cpu(int width, int height, int spp, bool linear, float start_time, float end_time, float fps, float shutter_fraction) {
@@ -164,7 +159,7 @@ py::array_t<float> Testbed::render_to_cpu(int width, int height, int spp, bool l
 		float end_alpha = ((float)i + 1.0f)/(float)spp * shutter_fraction;
 
 		auto sample_start_cam_matrix = start_cam_matrix;
-		auto sample_end_cam_matrix = log_space_lerp(start_cam_matrix, end_cam_matrix, shutter_fraction);
+		auto sample_end_cam_matrix = camera_log_lerp(start_cam_matrix, end_cam_matrix, shutter_fraction);
 		if (i == 0) {
 			prev_camera_matrix = sample_start_cam_matrix;
 		}
@@ -205,20 +200,52 @@ py::array_t<float> Testbed::render_to_cpu(int width, int height, int spp, bool l
 	return result;
 }
 
-#ifdef NGP_GUI
-py::array_t<float> Testbed::screenshot(bool linear) const {
-	std::vector<float> tmp(m_window_res.prod() * 4);
-	glReadPixels(0, 0, m_window_res.x(), m_window_res.y(), GL_RGBA, GL_FLOAT, tmp.data());
+py::array_t<float> Testbed::view(bool linear, size_t view_idx) const {
+	if (m_views.size() <= view_idx) {
+		throw std::runtime_error{fmt::format("View #{} does not exist.", view_idx)};
+	}
 
-	py::array_t<float> result({m_window_res.y(), m_window_res.x(), 4});
+	auto& view = m_views.at(view_idx);
+	auto& render_buffer = *view.render_buffer;
+
+	auto res = render_buffer.out_resolution();
+
+	py::array_t<float> result({res.y, res.x, 4});
+	py::buffer_info buf = result.request();
+	float* data = (float*)buf.ptr;
+
+	CUDA_CHECK_THROW(cudaMemcpy2DFromArray(data, res.x * sizeof(float) * 4, render_buffer.surface_provider().array(), 0, 0, res.x * sizeof(float) * 4, res.y, cudaMemcpyDeviceToHost));
+
+	if (linear) {
+		ThreadPool{}.parallel_for<size_t>(0, res.y, [&](size_t y) {
+			size_t base = y * res.x;
+			for (uint32_t x = 0; x < res.x; ++x) {
+				size_t px = base + x;
+				data[px*4+0] = srgb_to_linear(data[px*4+0]);
+				data[px*4+1] = srgb_to_linear(data[px*4+1]);
+				data[px*4+2] = srgb_to_linear(data[px*4+2]);
+			}
+		});
+	}
+
+	return result;
+}
+
+#ifdef NGP_GUI
+py::array_t<float> Testbed::screenshot(bool linear, bool front_buffer) const {
+	std::vector<float> tmp(product(m_window_res) * 4);
+	glReadBuffer(front_buffer ? GL_FRONT : GL_BACK);
+	glReadPixels(0, 0, m_window_res.x, m_window_res.y, GL_RGBA, GL_FLOAT, tmp.data());
+
+	py::array_t<float> result({m_window_res.y, m_window_res.x, 4});
 	py::buffer_info buf = result.request();
 	float* data = (float*)buf.ptr;
 
 	// Linear, alpha premultiplied, Y flipped
-	ThreadPool{}.parallel_for<size_t>(0, m_window_res.y(), [&](size_t y) {
-		size_t base = y * m_window_res.x();
-		size_t base_reverse = (m_window_res.y() - y - 1) * m_window_res.x();
-		for (uint32_t x = 0; x < m_window_res.x(); ++x) {
+	ThreadPool{}.parallel_for<size_t>(0, m_window_res.y, [&](size_t y) {
+		size_t base = y * m_window_res.x;
+		size_t base_reverse = (m_window_res.y - y - 1) * m_window_res.x;
+		for (uint32_t x = 0; x < m_window_res.x; ++x) {
 			size_t px = base + x;
 			size_t px_reverse = base_reverse + x;
 			data[px_reverse*4+0] = linear ? srgb_to_linear(tmp[px*4+0]) : tmp[px*4+0];
@@ -235,7 +262,7 @@ py::array_t<float> Testbed::screenshot(bool linear) const {
 PYBIND11_MODULE(pyngp, m) {
 	m.doc() = "Instant neural graphics primitives";
 
-	m.def("free_temporary_memory", &tcnn::free_all_gpu_memory_arenas);
+	m.def("free_temporary_memory", &free_all_gpu_memory_arenas);
 
 	py::enum_<ETestbedMode>(m, "TestbedMode")
 		.value("Nerf", ETestbedMode::Nerf)
@@ -326,13 +353,13 @@ PYBIND11_MODULE(pyngp, m) {
 
 	py::class_<BoundingBox>(m, "BoundingBox")
 		.def(py::init<>())
-		.def(py::init<const Vector3f&, const Vector3f&>())
+		.def(py::init<const vec3&, const vec3&>())
 		.def("center", &BoundingBox::center)
 		.def("contains", &BoundingBox::contains)
 		.def("diag", &BoundingBox::diag)
 		.def("distance", &BoundingBox::distance)
 		.def("distance_sq", &BoundingBox::distance_sq)
-		.def("enlarge", py::overload_cast<const Vector3f&>(&BoundingBox::enlarge))
+		.def("enlarge", py::overload_cast<const vec3&>(&BoundingBox::enlarge))
 		.def("enlarge", py::overload_cast<const BoundingBox&>(&BoundingBox::enlarge))
 		.def("get_vertices", &BoundingBox::get_vertices)
 		.def("inflate", &BoundingBox::inflate)
@@ -362,14 +389,16 @@ PYBIND11_MODULE(pyngp, m) {
 		.def("load_training_data", &Testbed::load_training_data, py::call_guard<py::gil_scoped_release>(), "Load training data from a given path.")
 		.def("clear_training_data", &Testbed::clear_training_data, "Clears training data to free up GPU memory.")
 		// General control
-#ifdef NGP_GUI
 		.def("init_window", &Testbed::init_window, "Init a GLFW window that shows real-time progress and a GUI. 'second_window' creates a second copy of the output in its own window.",
 			py::arg("width"),
 			py::arg("height"),
 			py::arg("hidden") = false,
 			py::arg("second_window") = false
 		)
-		.def("init_vr", &Testbed::init_vr, "Init rendering to a connected and active VR headset. Requires a GUI window to have been previously created via `init_window`.")
+		.def("destroy_window", &Testbed::destroy_window, "Destroy the window again.")
+		.def("init_vr", &Testbed::init_vr, "Init rendering to a connected and active VR headset. Requires a window to have been previously created via `init_window`.")
+		.def("view", &Testbed::view, "Outputs the currently displayed image by a given view (0 by default).", py::arg("linear")=true, py::arg("view")=0)
+#ifdef NGP_GUI
 		.def_readwrite("keyboard_event_callback", &Testbed::m_keyboard_event_callback)
 		.def("is_key_pressed", [](py::object& obj, int key) { return ImGui::IsKeyPressed(key); })
 		.def("is_key_down", [](py::object& obj, int key) { return ImGui::IsKeyDown(key); })
@@ -377,7 +406,9 @@ PYBIND11_MODULE(pyngp, m) {
 		.def("is_ctrl_down", [](py::object& obj) { return ImGui::GetIO().KeyMods & ImGuiKeyModFlags_Ctrl; })
 		.def("is_shift_down", [](py::object& obj) { return ImGui::GetIO().KeyMods & ImGuiKeyModFlags_Shift; })
 		.def("is_super_down", [](py::object& obj) { return ImGui::GetIO().KeyMods & ImGuiKeyModFlags_Super; })
-		.def("screenshot", &Testbed::screenshot, "Takes a screenshot of the current window contents.", py::arg("linear")=true)
+		.def("screenshot", &Testbed::screenshot, "Takes a screenshot of the current window contents.", py::arg("linear")=true, py::arg("front_buffer")=true)
+		.def_readwrite("vr_use_hidden_area_mask", &Testbed::m_vr_use_hidden_area_mask)
+		.def_readwrite("vr_use_depth_reproject", &Testbed::m_vr_use_depth_reproject)
 #endif
 		.def("want_repl", &Testbed::want_repl, "returns true if the user clicked the 'I want a repl' button")
 		.def("frame", &Testbed::frame, py::call_guard<py::gil_scoped_release>(), "Process a single frame. Renders if a window was previously created.")
@@ -391,7 +422,6 @@ PYBIND11_MODULE(pyngp, m) {
 			py::arg("fps") = 30.f,
 			py::arg("shutter_fraction") = 1.0f
 		)
-		.def("destroy_window", &Testbed::destroy_window, "Destroy the window again.")
 		.def("train", &Testbed::train, py::call_guard<py::gil_scoped_release>(), "Perform a single training step with a specified batch size.")
 		.def("reset", &Testbed::reset_network, py::arg("reset_density_grid") = true, "Reset training.")
 		.def("reset_accumulation", &Testbed::reset_accumulation, "Reset rendering accumulation.",
@@ -413,13 +443,13 @@ PYBIND11_MODULE(pyngp, m) {
 		.def("n_params", &Testbed::n_params, "Number of trainable parameters")
 		.def("n_encoding_params", &Testbed::n_encoding_params, "Number of trainable parameters in the encoding")
 		.def("save_snapshot", &Testbed::save_snapshot, py::arg("path"), py::arg("include_optimizer_state")=false, py::arg("compress")=true, "Save a snapshot of the currently trained model. Optionally compressed (only when saving '.ingp' files).")
-		.def("load_snapshot", &Testbed::load_snapshot, py::arg("path"), "Load a previously saved snapshot")
+		.def("load_snapshot", py::overload_cast<const fs::path&>(&Testbed::load_snapshot), py::arg("path"), "Load a previously saved snapshot")
 		.def("load_camera_path", &Testbed::load_camera_path, py::arg("path"), "Load a camera path")
 		.def("load_file", &Testbed::load_file, py::arg("path"), "Load a file and automatically determine how to handle it. Can be a snapshot, dataset, network config, or camera path.")
 		.def_property("loop_animation", &Testbed::loop_animation, &Testbed::set_loop_animation)
 		.def("compute_and_save_png_slices", &Testbed::compute_and_save_png_slices,
 			py::arg("filename"),
-			py::arg("resolution") = Eigen::Vector3i::Constant(256),
+			py::arg("resolution") = 256,
 			py::arg("aabb") = BoundingBox{},
 			py::arg("thresh") = std::numeric_limits<float>::max(),
 			py::arg("density_range") = 4.f,
@@ -428,7 +458,7 @@ PYBIND11_MODULE(pyngp, m) {
 		)
 		.def("compute_and_save_marching_cubes_mesh", &Testbed::compute_and_save_marching_cubes_mesh,
 			py::arg("filename"),
-			py::arg("resolution") = Eigen::Vector3i::Constant(256),
+			py::arg("resolution") = ivec3(256),
 			py::arg("aabb") = BoundingBox{},
 			py::arg("thresh") = std::numeric_limits<float>::max(),
 			py::arg("generate_uvs_for_obj_file") = false,
@@ -438,7 +468,7 @@ PYBIND11_MODULE(pyngp, m) {
 			"If the aabb parameter specifies an inside-out (\"empty\") box (default), the current render_aabb bounding box is used."
 		)
 		.def("compute_marching_cubes_mesh", &Testbed::compute_marching_cubes_mesh,
-			py::arg("resolution") = Eigen::Vector3i::Constant(256),
+			py::arg("resolution") = ivec3(256),
 			py::arg("aabb") = BoundingBox{},
 			py::arg("thresh") = std::numeric_limits<float>::max(),
 			"Compute a marching cubes mesh from the current SDF or NeRF model. "
@@ -531,7 +561,7 @@ PYBIND11_MODULE(pyngp, m) {
 		.def("crop_box_corners", &Testbed::crop_box_corners, py::arg("nerf_space") = true)
 		.def_property("root_dir",
 			[](py::object& obj) { return obj.cast<Testbed&>().root_dir().str(); },
-			[](const py::object& obj, const std::string& value) { obj.cast<Testbed&>().m_root_dir = value; }
+			[](const py::object& obj, const std::string& value) { obj.cast<Testbed&>().set_root_dir(value); }
 		)
 		;
 
@@ -543,7 +573,6 @@ PYBIND11_MODULE(pyngp, m) {
 			return py::array{sizeof(o.params)/sizeof(o.params[0]), o.params, obj};
 		})
 		;
-
 
 	py::class_<Testbed::Nerf> nerf(testbed, "Nerf");
 	nerf
@@ -562,6 +591,12 @@ PYBIND11_MODULE(pyngp, m) {
 		.def_readwrite("visualize_cameras", &Testbed::Nerf::visualize_cameras)
 		.def_readwrite("glow_y_cutoff", &Testbed::Nerf::glow_y_cutoff)
 		.def_readwrite("glow_mode", &Testbed::Nerf::glow_mode)
+		.def_readwrite("render_gbuffer_hard_edges", &Testbed::Nerf::render_gbuffer_hard_edges)
+		.def_readwrite("rendering_extra_dims_from_training_view", &Testbed::Nerf::rendering_extra_dims_from_training_view, "If non-negative, indicates the training view from which the extra dims are used. If -1, uses the values previously set by `set_rendering_extra_dims`.")
+		.def("find_closest_training_view", &Testbed::Nerf::find_closest_training_view, "Obtain the training view that is closest to the current camera.")
+		.def("set_rendering_extra_dims_from_training_view", &Testbed::Nerf::set_rendering_extra_dims_from_training_view, "Set the extra dims that are used for rendering to those that were trained for a given training view.")
+		.def("set_rendering_extra_dims", &Testbed::Nerf::set_rendering_extra_dims, "Set the extra dims that are used for rendering.")
+		.def("get_rendering_extra_dims", &Testbed::Nerf::get_rendering_extra_dims_cpu, "Get the extra dims that are currently used for rendering.")
 		;
 
 	py::class_<BRDFParams> brdfparams(m, "BRDFParams");
@@ -614,6 +649,7 @@ PYBIND11_MODULE(pyngp, m) {
 		.def_readwrite("depth_loss_type", &Testbed::Nerf::Training::depth_loss_type)
 		.def_readwrite("snap_to_pixel_centers", &Testbed::Nerf::Training::snap_to_pixel_centers)
 		.def_readwrite("optimize_extrinsics", &Testbed::Nerf::Training::optimize_extrinsics)
+		.def_readwrite("optimize_per_image_latents", &Testbed::Nerf::Training::optimize_extra_dims)
 		.def_readwrite("optimize_extra_dims", &Testbed::Nerf::Training::optimize_extra_dims)
 		.def_readwrite("optimize_exposure", &Testbed::Nerf::Training::optimize_exposure)
 		.def_readwrite("optimize_distortion", &Testbed::Nerf::Training::optimize_distortion)
@@ -632,6 +668,7 @@ PYBIND11_MODULE(pyngp, m) {
 		.def_readwrite("exposure_l2_reg", &Testbed::Nerf::Training::exposure_l2_reg)
 		.def_readwrite("depth_supervision_lambda", &Testbed::Nerf::Training::depth_supervision_lambda)
 		.def_readonly("dataset", &Testbed::Nerf::Training::dataset)
+		.def("get_extra_dims", &Testbed::Nerf::Training::get_extra_dims_cpu, "Get the extra dims (including trained latent code) for a specified training view.")
 		.def("set_camera_intrinsics", &Testbed::Nerf::Training::set_camera_intrinsics,
 			py::arg("frame_idx"),
 			py::arg("fx")=0.f, py::arg("fy")=0.f,
@@ -693,4 +730,4 @@ PYBIND11_MODULE(pyngp, m) {
 		;
 }
 
-NGP_NAMESPACE_END
+}

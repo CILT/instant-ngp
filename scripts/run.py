@@ -48,14 +48,15 @@ def parse_args():
 
 	parser.add_argument("--video_camera_path", default="", help="The camera path to render, e.g., base_cam.json.")
 	parser.add_argument("--video_camera_smoothing", action="store_true", help="Applies additional smoothing to the camera trajectory with the caveat that the endpoint of the camera path may not be reached.")
-	parser.add_argument("--video_loop_animation", action="store_true", help="Connect the last and first keyframes in a continuous loop.")
 	parser.add_argument("--video_fps", type=int, default=60, help="Number of frames per second.")
 	parser.add_argument("--video_n_seconds", type=int, default=1, help="Number of seconds the rendered video should be long.")
+	parser.add_argument("--video_render_range", type=int, nargs=2, default=(-1, -1), metavar=("START_FRAME", "END_FRAME"), help="Limit output to frames between START_FRAME and END_FRAME (inclusive)")
 	parser.add_argument("--video_spp", type=int, default=8, help="Number of samples per pixel. A larger number means less noise, but slower rendering.")
-	parser.add_argument("--video_output", type=str, default="video.mp4", help="Filename of the output video.")
+	parser.add_argument("--video_output", type=str, default="video.mp4", help="Filename of the output video (video.mp4) or video frames (video_%%04d.png).")
 
 	parser.add_argument("--save_mesh", default="", help="Output a marching-cubes based mesh from the NeRF or SDF model. Supports OBJ and PLY format.")
 	parser.add_argument("--marching_cubes_res", default=256, type=int, help="Sets the resolution for the marching cubes grid.")
+	parser.add_argument("--marching_cubes_density_thresh", default=2.5, type=float, help="Sets the density threshold for marching cubes.")
 
 	parser.add_argument("--width", "--screenshot_w", type=int, default=0, help="Resolution width of GUI and screenshots.")
 	parser.add_argument("--height", "--screenshot_h", type=int, default=0, help="Resolution height of GUI and screenshots.")
@@ -179,7 +180,7 @@ if __name__ == "__main__":
 
 	tqdm_last_update = 0
 	if n_steps > 0:
-		with tqdm(desc="Training", total=n_steps, unit="step") as t:
+		with tqdm(desc="Training", total=n_steps, unit="steps") as t:
 			while testbed.frame():
 				if testbed.want_repl():
 					repl(testbed)
@@ -203,6 +204,7 @@ if __name__ == "__main__":
 					tqdm_last_update = now
 
 	if args.save_snapshot:
+		os.makedirs(os.path.dirname(args.save_snapshot), exist_ok=True)
 		testbed.save_snapshot(args.save_snapshot, False)
 
 	if args.test_transforms:
@@ -267,8 +269,9 @@ if __name__ == "__main__":
 
 	if args.save_mesh:
 		res = args.marching_cubes_res or 256
-		print(f"Generating mesh via marching cubes and saving to {args.save_mesh}. Resolution=[{res},{res},{res}]")
-		testbed.compute_and_save_marching_cubes_mesh(args.save_mesh, [res, res, res])
+		thresh = args.marching_cubes_density_thresh or 2.5
+		print(f"Generating mesh via marching cubes and saving to {args.save_mesh}. Resolution=[{res},{res},{res}], Density Threshold={thresh}")
+		testbed.compute_and_save_marching_cubes_mesh(args.save_mesh, [res, res, res], thresh=thresh)
 
 	if ref_transforms:
 		testbed.fov_axis = 0
@@ -278,7 +281,7 @@ if __name__ == "__main__":
 		print(args.screenshot_frames)
 		for idx in args.screenshot_frames:
 			f = ref_transforms["frames"][int(idx)]
-			cam_matrix = f["transform_matrix"]
+			cam_matrix = f.get("transform_matrix", f["transform_matrix_start"])
 			testbed.set_nerf_camera_matrix(np.matrix(cam_matrix)[:-1,:])
 			outname = os.path.join(args.screenshot_dir, os.path.basename(f["file_path"]))
 
@@ -300,10 +303,11 @@ if __name__ == "__main__":
 
 	if args.video_camera_path:
 		testbed.load_camera_path(args.video_camera_path)
-		testbed.loop_animation = args.video_loop_animation
 
 		resolution = [args.width or 1920, args.height or 1080]
 		n_frames = args.video_n_seconds * args.video_fps
+		save_frames = "%" in args.video_output
+		start_frame, end_frame = args.video_render_range
 
 		if "tmp" in os.listdir():
 			shutil.rmtree("tmp")
@@ -311,8 +315,24 @@ if __name__ == "__main__":
 
 		for i in tqdm(list(range(min(n_frames, n_frames+1))), unit="frames", desc=f"Rendering video"):
 			testbed.camera_smoothing = args.video_camera_smoothing
-			frame = testbed.render(resolution[0], resolution[1], args.video_spp, True, float(i)/n_frames, float(i + 1)/n_frames, args.video_fps, shutter_fraction=0.5)
-			write_image(f"tmp/{i:04d}.jpg", np.clip(frame * 2**args.exposure, 0.0, 1.0), quality=100)
 
-		os.system(f"ffmpeg -y -framerate {args.video_fps} -i tmp/%04d.jpg -c:v libx264 -pix_fmt yuv420p {args.video_output}")
+			if start_frame >= 0 and i < start_frame:
+				# For camera smoothing and motion blur to work, we cannot just start rendering
+				# from middle of the sequence. Instead we render a very small image and discard it
+				# for these initial frames.
+				# TODO Replace this with a no-op render method once it's available
+				frame = testbed.render(32, 32, 1, True, float(i)/n_frames, float(i + 1)/n_frames, args.video_fps, shutter_fraction=0.5)
+				continue
+			elif end_frame >= 0 and i > end_frame:
+				continue
+
+			frame = testbed.render(resolution[0], resolution[1], args.video_spp, True, float(i)/n_frames, float(i + 1)/n_frames, args.video_fps, shutter_fraction=0.5)
+			if save_frames:
+				write_image(args.video_output % i, np.clip(frame * 2**args.exposure, 0.0, 1.0), quality=100)
+			else:
+				write_image(f"tmp/{i:04d}.jpg", np.clip(frame * 2**args.exposure, 0.0, 1.0), quality=100)
+
+		if not save_frames:
+			os.system(f"ffmpeg -y -framerate {args.video_fps} -i tmp/%04d.jpg -c:v libx264 -pix_fmt yuv420p {args.video_output}")
+
 		shutil.rmtree("tmp")

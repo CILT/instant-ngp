@@ -135,7 +135,7 @@ To view the neural graphics primitive in VR, first start your VR runtime. This w
 - __SteamVR__ if you have another headset.
 - Any OpenXR-compatible runtime will work.
 
-Then, press the __View in VR/AR headset__ button in the __instant-ngp__ GUI and put on your headset.
+Then, press the __Connect to VR/AR headset__ button in the __instant-ngp__ GUI and put on your headset.
 Before entering VR, we **strongly** recommend that you first finish training (press "Stop training") or load a pre-trained snapshot for maximum performance.
 
 In VR, you have the following controls.
@@ -196,7 +196,7 @@ $ cd instant-ngp
 
 Then, use CMake to build the project: (on Windows, this must be in a [developer command prompt](https://docs.microsoft.com/en-us/cpp/build/building-on-the-command-line?view=msvc-160#developer_command_prompt))
 ```sh
-instant-ngp$ cmake . -B build
+instant-ngp$ cmake . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 instant-ngp$ cmake --build build --config RelWithDebInfo -j
 ```
 
@@ -360,3 +360,4 @@ Many thanks to the authors of these brilliant projects!
 Copyright © 2022, NVIDIA Corporation. All rights reserved.
 
 This work is made available under the Nvidia Source Code License-NC. Click [here](LICENSE.txt) to view a copy of this license.
+

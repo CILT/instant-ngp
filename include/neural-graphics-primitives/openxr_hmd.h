@@ -32,8 +32,6 @@
 #include <xr_dependencies.h>
 #include <openxr/openxr_platform.h>
 
-#include <Eigen/Dense>
-
 #include <tiny-cuda-nn/gpu_memory.h>
 
 #include <array>
@@ -45,14 +43,29 @@
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers" //TODO: XR struct are uninitiaized apart from their type
 #endif
 
-NGP_NAMESPACE_BEGIN
+namespace ngp {
+
+enum class EEnvironmentBlendMode {
+	Opaque = XR_ENVIRONMENT_BLEND_MODE_OPAQUE,
+	Additive = XR_ENVIRONMENT_BLEND_MODE_ADDITIVE,
+	AlphaBlend = XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND,
+};
+
+inline std::string to_string(EEnvironmentBlendMode mode) {
+	switch (mode) {
+		case EEnvironmentBlendMode::Opaque: return "Opaque";
+		case EEnvironmentBlendMode::Additive: return "Additive";
+		case EEnvironmentBlendMode::AlphaBlend: return "Blend";
+		default: throw std::runtime_error{"Invalid blend mode."};
+	}
+}
 
 class OpenXRHMD {
 public:
-	enum class ControlFlow {
-		CONTINUE,
-		RESTART,
-		QUIT,
+	enum class EControlFlow {
+		Continue,
+		Restart,
+		Quit,
 	};
 
 	struct FrameInfo {
@@ -61,18 +74,18 @@ public:
 			XrCompositionLayerProjectionView view{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
 			XrCompositionLayerDepthInfoKHR depth_info{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
 			std::shared_ptr<Buffer2D<uint8_t>> hidden_area_mask = nullptr;
-			Eigen::Matrix<float, 3, 4> pose;
+			mat4x3 pose;
 		};
 		struct Hand {
-			Eigen::Matrix<float, 3, 4> pose;
+			mat4x3 pose;
 			bool pose_active = false;
-			Eigen::Vector2f thumbstick = Eigen::Vector2f::Zero();
+			vec2 thumbstick = vec2(0.0f);
 			float grab_strength = 0.0f;
 			bool grabbing = false;
 			bool pressing = false;
-			Eigen::Vector3f grab_pos;
-			Eigen::Vector3f prev_grab_pos;
-			Eigen::Vector3f drag() const {
+			vec3 grab_pos;
+			vec3 prev_grab_pos;
+			vec3 drag() const {
 				return grab_pos - prev_grab_pos;
 			}
 		};
@@ -101,12 +114,28 @@ public:
 	void clear();
 
 	// poll events, handle state changes, return control flow information
-	ControlFlow poll_events();
+	EControlFlow poll_events();
 
 	// begin OpenXR frame, return views to render
 	FrameInfoPtr begin_frame();
 	// must be called for each begin_frame
-	void end_frame(FrameInfoPtr frame_info, float znear, float zfar);
+	void end_frame(FrameInfoPtr frame_info, float znear, float zfar, bool submit_depth);
+
+	void set_environment_blend_mode(EEnvironmentBlendMode mode) {
+		m_environment_blend_mode = mode;
+	}
+
+	EEnvironmentBlendMode environment_blend_mode() const {
+		return m_environment_blend_mode;
+	}
+
+	const std::vector<EEnvironmentBlendMode>& supported_environment_blend_modes() const {
+		return m_supported_environment_blend_modes;
+	}
+
+	const char* supported_environment_blend_modes_imgui_string() const {
+		return m_supported_environment_blend_modes_imgui_string.data();
+	}
 
 	// if true call begin_frame and end_frame - does not imply visibility
 	bool must_run_frame_loop() const {
@@ -146,7 +175,7 @@ private:
 	void init_open_gl_shaders();
 
 	// session state change
-	void session_state_change(XrSessionState state, ControlFlow& flow);
+	void session_state_change(XrSessionState state, EControlFlow& flow);
 
 	std::shared_ptr<Buffer2D<uint8_t>> rasterize_hidden_area_mask(uint32_t view_index, const XrCompositionLayerProjectionView& view);
 	// system/instance
@@ -161,8 +190,9 @@ private:
 	XrViewConfigurationType m_view_configuration_type = {};
 	XrViewConfigurationProperties m_view_configuration_properties = {XR_TYPE_VIEW_CONFIGURATION_PROPERTIES};
 	std::vector<XrViewConfigurationView> m_view_configuration_views;
-	std::vector<XrEnvironmentBlendMode> m_environment_blend_modes;
-	XrEnvironmentBlendMode m_environment_blend_mode = {XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
+	std::vector<EEnvironmentBlendMode> m_supported_environment_blend_modes;
+	std::vector<char> m_supported_environment_blend_modes_imgui_string;
+	EEnvironmentBlendMode m_environment_blend_mode = EEnvironmentBlendMode::Opaque;
 
 	// actions
 	std::array<XrPath, 2> m_hand_paths;
@@ -254,7 +284,7 @@ private:
 	const bool m_print_reference_spaces = false;
 };
 
-NGP_NAMESPACE_END
+}
 
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
