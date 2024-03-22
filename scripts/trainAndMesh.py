@@ -321,6 +321,9 @@ if __name__ == "__main__":
 	if args.save_mesh:
 		res = args.marching_cubes_res or 256
 		print(f"Generating mesh via marching cubes and saving to {args.save_mesh}. Resolution=[{res},{res},{res}]")
+        ###############################################
+        # This is needed to crop automatically the mesh
+        # (added by me CILT)
 		crop_scale = ngp.BoundingBox()
 		crop_scale.min = [0.046, 0.046, 0.046]
 		crop_scale.max = [1.081, 1.081, 1.081]
